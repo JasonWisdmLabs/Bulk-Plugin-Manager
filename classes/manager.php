@@ -133,26 +133,55 @@ class manager {
     }
 
     /**
-     * Uninstall a single plugin, suppressing output.
+     * Uninstall a single plugin.
+     *
+     * Both core_component and core_plugin_manager caches are reset before the
+     * uninstallability check. This is essential during a bulk loop: after each
+     * uninstall the previously-removed plugin still lives in core_component's
+     * static $plugins array, so subsequent can_uninstall_plugin() calls see
+     * stale dependents and falsely return false.
      *
      * @param  string $component
-     * @return bool   True on success.
+     * @return true|string  True on success, human-readable error string on failure.
      */
-    public static function uninstall_plugin(string $component): bool {
+    public static function uninstall_plugin(string $component) {
+        // Flush both caches so this call sees the real on-disk state, not a
+        // snapshot taken before earlier plugins in the batch were removed.
+        \core_component::reset();
+        \core_plugin_manager::reset_caches();
+
         $pluginman = \core_plugin_manager::instance();
+        $pluginfo  = $pluginman->get_plugin_info($component);
+
+        if (!$pluginfo) {
+            return "Plugin not found: {$component}";
+        }
 
         if (!$pluginman->can_uninstall_plugin($component)) {
-            return false;
+            return "Plugin cannot be uninstalled (core-locked or a required dependent is still installed).";
         }
+
+        // Capture the directory now — the pluginfo object becomes stale after uninstall.
+        $rootdir = $pluginfo->rootdir;
 
         try {
             $progress = new \null_progress_trace();
             $pluginman->uninstall_plugin($component, $progress);
+
+            // Delete plugin files from disk. Without this Moodle detects the
+            // directory on the next page load and flags the plugin as
+            // "to be installed", undoing the uninstall visually.
+            if ($rootdir && is_dir($rootdir)) {
+                fulldelete($rootdir);
+            }
+
+            // Reset again so the next plugin in the batch gets a clean scan.
+            \core_component::reset();
             \core_plugin_manager::reset_caches();
+
             return true;
         } catch (\Throwable $e) {
-            debugging("tool_bulkpluginmanager: failed to uninstall {$component}: " . $e->getMessage(), DEBUG_DEVELOPER);
-            return false;
+            return $e->getMessage();
         }
     }
 

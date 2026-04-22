@@ -592,6 +592,18 @@ function render_step3_uninstall(array $ordered, array $depmap, array $violations
 // ----------------------------------------------------------------------------
 
 function render_execute_uninstall(array $ordered, \renderer_base $OUTPUT, \moodle_page $PAGE): void {
+    // Run every uninstall BEFORE touching page output.
+    // Each call to manager::uninstall_plugin() triggers purge_all_caches() internally
+    // (via adminlib's uninstall_plugin). That increments $CFG->jsrev, changing the AMD
+    // module URL paths. If this happens between $OUTPUT->header() and $OUTPUT->footer(),
+    // the header and footer reference different revisions, the RequireJS factory for
+    // 'jquery' can't be resolved, and `$ is not a function` is thrown.
+    $results = [];
+    foreach ($ordered as $component) {
+        $results[$component] = manager::uninstall_plugin($component);
+    }
+
+    // All cache side-effects are done — safe to render the page now.
     echo $OUTPUT->header();
     echo render_tabs('uninstall', $OUTPUT);
     echo $OUTPUT->heading(get_string('uninstall_progress', 'tool_bulkpluginmanager'), 2);
@@ -601,22 +613,21 @@ function render_execute_uninstall(array $ordered, \renderer_base $OUTPUT, \moodl
 
     echo html_writer::start_tag('ul', ['class' => 'bpm-progress-list list-group']);
 
-    foreach ($ordered as $component) {
-        $ok = manager::uninstall_plugin($component);
-
-        if ($ok) {
+    foreach ($results as $component => $result) {
+        if ($result === true) {
             $success++;
             $icon  = html_writer::tag('span', '✔', ['class' => 'text-success mr-2']);
             $msg   = get_string('uninstall_success', 'tool_bulkpluginmanager', s($component));
             $class = 'list-group-item list-group-item-success';
+            echo html_writer::tag('li', $icon . $msg, ['class' => $class]);
         } else {
             $failed++;
-            $icon  = html_writer::tag('span', '✘', ['class' => 'text-danger mr-2']);
-            $msg   = get_string('uninstall_failed', 'tool_bulkpluginmanager', s($component));
-            $class = 'list-group-item list-group-item-danger';
+            $icon   = html_writer::tag('span', '✘', ['class' => 'text-danger mr-2']);
+            $msg    = get_string('uninstall_failed', 'tool_bulkpluginmanager', s($component));
+            $detail = html_writer::tag('small', s($result), ['class' => 'd-block text-muted ml-4 mt-1']);
+            $class  = 'list-group-item list-group-item-danger';
+            echo html_writer::tag('li', $icon . $msg . $detail, ['class' => $class]);
         }
-
-        echo html_writer::tag('li', $icon . $msg, ['class' => $class]);
     }
 
     echo html_writer::end_tag('ul');
@@ -624,14 +635,10 @@ function render_execute_uninstall(array $ordered, \renderer_base $OUTPUT, \moodl
     $summary = (object) ['success' => $success, 'failed' => $failed];
     echo html_writer::tag('p', get_string('uninstall_complete_desc', 'tool_bulkpluginmanager', $summary), ['class' => 'mt-3 font-weight-bold']);
 
-    // Link back to plugin overview.
     echo html_writer::tag('a', get_string('view_plugin_overview', 'tool_bulkpluginmanager'), [
         'href'  => (new moodle_url('/admin/plugins.php'))->out(false),
         'class' => 'btn btn-primary mt-2',
     ]);
-
-    // Purge caches after bulk uninstall.
-    purge_all_caches();
 
     echo $OUTPUT->footer();
 }
