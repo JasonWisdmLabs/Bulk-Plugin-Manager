@@ -1,0 +1,127 @@
+/* Bulk Plugin Manager — styles */
+
+/* Plugin table */
+#bpm-plugin-table tbody tr {
+    transition: background-color 0.15s;
+}
+
+#bpm-plugin-table .bpm-deps,
+#bpm-plugin-table .bpm-blocked-by {
+    font-size: 0.8em;
+}
+
+/* Conditionally uninstallable rows — selectable but needs dependents co-selected */
+#bpm-plugin-table tbody tr.bpm-row-conditional {
+    background-color: #fffbf0;
+}
+
+#bpm-plugin-table tbody tr.bpm-row-conditional:hover {
+    background-color: #fff3cd;
+}
+
+/* Truly locked rows */
+#bpm-plugin-table tbody tr.bpm-row-locked {
+    opacity: 0.6;
+}
+
+/* Search and filter bar */
+.bpm-controls {
+    gap: 0.5rem;
+}
+
+.bpm-search-input {
+    min-width: 200px;
+}
+
+.bpm-count-badge {
+    font-size: 0.9em;
+}
+
+/* Order list — drag-and-drop */
+#bpm-order-list {
+    max-width: 800px;
+}
+
+#bpm-order-list .list-group-item {
+    cursor: default;
+    user-select: none;
+}
+
+#bpm-order-list .list-group-item.bpm-dragging {
+    opacity: 0.5;
+    background-color: #f8f9fa;
+}
+
+#bpm-order-list .list-group-item.bpm-drag-over {
+    border-top: 2px solid #007bff;
+    background-color: #e8f4fd;
+}
+
+.bpm-drag-handle {
+    font-size: 1.2em;
+    line-height: 1;
+    cursor: grab !important;
+    padding: 0 4px;
+    flex-shrink: 0;
+}
+
+.bpm-drag-handle:active {
+    cursor: grabbing !important;
+}
+
+.bpm-arrows {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+}
+
+/* Dependency warning */
+.bpm-dep-warning {
+    font-size: 0.85em;
+}
+
+/* Confirm list */
+.bpm-confirm-list {
+    max-width: 600px;
+    font-size: 1.05em;
+    line-height: 1.8;
+}
+
+/* Progress/execution list */
+.bpm-progress-list {
+    max-width: 700px;
+}
+
+/* Install log (pre block) */
+.bpm-install-log {
+    max-height: 400px;
+    overflow-y: auto;
+    font-size: 0.85em;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+/* Drop zone */
+.bpm-dropzone {
+    border: 2px dashed #6c757d;
+    border-radius: 8px;
+    max-width: 600px;
+    background: #fafafa;
+    transition: border-color 0.2s, background-color 0.2s;
+}
+
+.bpm-dropzone:hover,
+.bpm-dropzone.bpm-dragover {
+    border-color: #007bff;
+    background-color: #e8f4fd;
+}
+
+/* Gap utility fallback for older Bootstrap */
+.gap-2 > * + * {
+    margin-left: 0.5rem;
+}
+
+.bpm-form-actions {
+    padding-top: 0.5rem;
+}
