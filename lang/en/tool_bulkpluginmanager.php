@@ -126,3 +126,27 @@ $string['error_no_permission']       = 'You do not have permission to manage plu
 $string['error_sesskey']             = 'Session key mismatch. Please try again.';
 $string['error_invalid_component']   = 'Invalid plugin component: {$a}';
 $string['error_uninstall']           = 'An error occurred during uninstall of {$a}.';
+
+// Backup tab.
+$string['tab_backup']                = 'Backup & Restore';
+$string['backup_heading']            = 'Backup Additional Plugins';
+$string['backup_desc']               = 'Create a backup archive of all non-core (additional) plugins currently installed. The archive is stored in the Moodle data folder and survives plugin uninstalls and core upgrades.';
+$string['backup_status_none']        = 'No backup file found.';
+$string['backup_status_exists']      = 'Backup found: {$a->size} created on {$a->date}';
+$string['backup_create_btn']         = 'Create Backup';
+$string['backup_restore_btn']        = 'Restore from Backup';
+$string['backup_plugins_included']   = 'Plugins that will be backed up';
+$string['backup_no_plugins']         = 'No additional plugins found to back up.';
+$string['backup_create_success']     = 'Backup created successfully containing {$a} plugin(s).';
+$string['backup_dir_not_writable']   = 'Backup directory is not writable: <strong>{$a}</strong>. Ensure the web server user (e.g. <code>www-data</code> or <code>apache</code>) has write permission on this directory.';
+$string['backup_remove_failed']      = 'Could not remove existing backup file: <strong>{$a}</strong>. It may be owned by a different user. Delete it manually or change its ownership to the web server user (e.g. <code>www-data</code> or <code>apache</code>).';
+$string['backup_zip_open_failed']    = 'Could not open ZipArchive for writing. Check that the Moodle data directory is writable by the web server user (e.g. <code>www-data</code> or <code>apache</code>).';
+$string['backup_zip_close_failed']   = 'Could not write backup file: <strong>{$a->file}</strong>.<br>Error: <code>{$a->status}</code><br>Temp path: <code>{$a->temp}</code><br>Make sure the web server user (e.g. <code>www-data</code> or <code>apache</code>) has write permission on the Moodle data directory and temp directory.';
+$string['backup_move_failed']        = 'Could not move backup file to Moodle data directory: <strong>{$a}</strong>. Check disk space and directory permissions.';
+$string['backup_restore_noplugins']  = 'No valid plugins found in the backup archive.';
+$string['restore_order_heading']     = 'Review Restore Order';
+$string['restore_order_desc']        = 'These plugins were found in the backup. Review the installation order before restoring.';
+$string['restore_confirm_heading']   = 'Confirm Restore';
+$string['restore_confirm_desc']      = 'The following plugins will be restored from the backup.';
+$string['restore_deploying']         = 'Restoring plugins from backup...';
+$string['restore_complete_manual']   = 'All plugins restored. Click below to complete the database upgrade.';

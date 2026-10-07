@@ -41,7 +41,7 @@ $step   = optional_param('step',   1,           PARAM_INT);
 $action = optional_param('action', '',          PARAM_ALPHA);
 
 // Normalise tab.
-if (!in_array($tab, ['uninstall', 'install'])) {
+if (!in_array($tab, ['uninstall', 'install', 'backup'])) {
     $tab = 'uninstall';
 }
 
@@ -232,23 +232,20 @@ if ($tab === 'install' && $step === 2 && $_SERVER['REQUEST_METHOD'] === 'POST') 
         }
     }
 
+    // Build infomap keyed by component.
+    $infomap = [];
+    foreach ($parsed as $upload) {
+        $infomap[$upload->info->component] = $upload->info;
+    }
+
     // Store in session.
     $SESSION->tool_bulkpluginmanager = [
         'tab'     => 'install',
         'plugins' => $sorted,
         'depmap'  => $depmap,
         'paths'   => $sortedpaths,
-        'infos'   => array_combine(
-            array_column($parsed, null),
-            array_map(fn($u) => $u->info, $parsed)
-        ),
+        'infos'   => $infomap,
     ];
-    // Re-index infos by component.
-    $infomap = [];
-    foreach ($parsed as $upload) {
-        $infomap[$upload->info->component] = $upload->info;
-    }
-    $SESSION->tool_bulkpluginmanager['infos'] = $infomap;
 
     render_step2_install($sorted, $depmap, $infomap, $sortedpaths, $errors, $OUTPUT, $PAGE);
     exit;
@@ -297,13 +294,169 @@ if ($tab === 'install' && $action === 'execute' && $_SERVER['REQUEST_METHOD'] ==
 }
 
 // ============================================================================
-// Default: render step 1 (plugin selector or file upload).
+// POST: Backup — create backup archive.
+// ============================================================================
+if ($tab === 'backup' && $action === 'createbackup' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    require_sesskey();
+
+    $selected = optional_param_array('plugins', [], PARAM_COMPONENT);
+    $selected = array_filter($selected);
+
+    $result = manager::create_backup($selected);
+
+    if ($result['success']) {
+        redirect(
+            new moodle_url($baseurl, ['tab' => 'backup']),
+            get_string('backup_create_success', 'tool_bulkpluginmanager', count($result['plugins'])),
+            null,
+            \core\output\notification::NOTIFY_SUCCESS
+        );
+    } else {
+        redirect(
+            new moodle_url($baseurl, ['tab' => 'backup']),
+            $result['error'],
+            null,
+            \core\output\notification::NOTIFY_ERROR
+        );
+    }
+}
+
+// ============================================================================
+// POST: Backup — restore step 2 (extract plugins from backup).
+// ============================================================================
+if ($tab === 'backup' && $action === 'restore' && $step === 2 && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    require_sesskey();
+
+    if (!manager::is_install_allowed()) {
+        redirect(
+            new moodle_url($baseurl, ['tab' => 'backup']),
+            get_string('install_disabled', 'tool_bulkpluginmanager'),
+            null,
+            \core\output\notification::NOTIFY_ERROR
+        );
+    }
+
+    if (!file_exists(manager::get_backup_path())) {
+        redirect(
+            new moodle_url($baseurl, ['tab' => 'backup']),
+            get_string('backup_status_none', 'tool_bulkpluginmanager'),
+            null,
+            \core\output\notification::NOTIFY_WARNING
+        );
+    }
+
+    $uploads = manager::extract_plugins_from_backup();
+
+    $parsed = [];
+    $errors = [];
+    foreach ($uploads as $upload) {
+        if (!empty($upload->error)) {
+            $errors[] = "{$upload->original_name}: {$upload->error}";
+        } else {
+            $parsed[] = $upload;
+        }
+    }
+
+    if (empty($parsed)) {
+        redirect(
+            new moodle_url($baseurl, ['tab' => 'backup']),
+            implode('<br>', $errors) ?: get_string('backup_restore_noplugins', 'tool_bulkpluginmanager'),
+            null,
+            \core\output\notification::NOTIFY_ERROR
+        );
+    }
+
+    // Build dependency map from parsed backup plugins.
+    $components = array_map(fn($u) => $u->info->component, $parsed);
+    $depmap     = [];
+    foreach ($parsed as $upload) {
+        $depmap[$upload->info->component] = array_values(
+            array_filter($upload->info->dependencies, fn($d) => in_array($d, $components))
+        );
+    }
+
+    $sorted      = dependency_resolver::sort_for_install($components, $depmap);
+    $sortedpaths = [];
+    $pathmap     = [];
+    foreach ($parsed as $upload) {
+        $pathmap[$upload->info->component] = $upload->path;
+    }
+    foreach ($sorted as $comp) {
+        if (isset($pathmap[$comp])) {
+            $sortedpaths[$comp] = $pathmap[$comp];
+        }
+    }
+
+    $infomap = [];
+    foreach ($parsed as $upload) {
+        $infomap[$upload->info->component] = $upload->info;
+    }
+
+    // Store in session.
+    $SESSION->tool_bulkpluginmanager = [
+        'tab'     => 'backup_restore',
+        'plugins' => $sorted,
+        'depmap'  => $depmap,
+        'paths'   => $sortedpaths,
+        'infos'   => $infomap,
+    ];
+
+    render_step2_restore($sorted, $depmap, $infomap, $sortedpaths, $errors, $OUTPUT, $PAGE);
+    exit;
+}
+
+// ============================================================================
+// POST: Backup — restore step 3 (confirmation from step 2).
+// ============================================================================
+if ($tab === 'backup' && $action === 'restore' && $step === 3 && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    require_sesskey();
+
+    $orderjson = optional_param('order', '', PARAM_RAW);
+    $ordered   = !empty($orderjson) ? json_decode($orderjson, true) : [];
+    $ordered   = array_filter(array_map('clean_param', $ordered, array_fill(0, count($ordered), PARAM_COMPONENT)));
+
+    $session = $SESSION->tool_bulkpluginmanager ?? [];
+    $depmap  = $session['depmap'] ?? [];
+    $paths   = $session['paths']  ?? [];
+    $infomap = $session['infos']  ?? [];
+
+    $violations = dependency_resolver::validate_order($ordered, $depmap, 'install');
+
+    // Update session with reordered list.
+    $SESSION->tool_bulkpluginmanager['plugins'] = $ordered;
+
+    render_step3_restore($ordered, $depmap, $infomap, $paths, $violations, $OUTPUT, $PAGE);
+    exit;
+}
+
+// ============================================================================
+// POST: Backup — restore execute.
+// ============================================================================
+if ($tab === 'backup' && $action === 'execute_restore' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    require_sesskey();
+
+    $orderjson = optional_param('order', '', PARAM_RAW);
+    $ordered   = !empty($orderjson) ? json_decode($orderjson, true) : [];
+    $ordered   = array_filter(array_map('clean_param', $ordered, array_fill(0, count($ordered), PARAM_COMPONENT)));
+
+    $session = $SESSION->tool_bulkpluginmanager ?? [];
+    $paths   = $session['paths']  ?? [];
+    $infomap = $session['infos']  ?? [];
+
+    render_execute_restore($ordered, $paths, $infomap, $OUTPUT, $PAGE);
+    exit;
+}
+
+// ============================================================================
+// Default: render step 1 (plugin selector, file upload, or backup dashboard).
 // ============================================================================
 echo $OUTPUT->header();
 echo render_tabs($tab, $OUTPUT);
 
 if ($tab === 'uninstall') {
     render_step1_uninstall($OUTPUT, $PAGE);
+} elseif ($tab === 'backup') {
+    render_step1_backup($OUTPUT, $PAGE);
 } else {
     render_step1_install($OUTPUT, $PAGE);
 }
@@ -323,6 +476,7 @@ function render_tabs(string $activetab, \renderer_base $OUTPUT): string {
     $tabs = [
         new tabobject('uninstall', new moodle_url($baseurl, ['tab' => 'uninstall']), get_string('tab_uninstall', 'tool_bulkpluginmanager')),
         new tabobject('install',   new moodle_url($baseurl, ['tab' => 'install']),   get_string('tab_install',   'tool_bulkpluginmanager')),
+        new tabobject('backup',    new moodle_url($baseurl, ['tab' => 'backup']),    get_string('tab_backup',    'tool_bulkpluginmanager')),
     ];
 
     return $OUTPUT->tabtree($tabs, $activetab);
@@ -942,4 +1096,429 @@ function render_order_list(array $sorted, array $depmap, \core_plugin_manager $p
 
     $html .= html_writer::end_tag('ul');
     return $html;
+}
+
+// ----------------------------------------------------------------------------
+// BACKUP — Step 1: Dashboard
+// ----------------------------------------------------------------------------
+
+function render_step1_backup(\renderer_base $OUTPUT, \moodle_page $PAGE): void {
+    $baseurl      = new moodle_url('/admin/tool/bulkpluginmanager/index.php');
+    $backuppath   = manager::get_backup_path();
+    $backupexists = file_exists($backuppath);
+    $plugins      = manager::get_additional_plugins();
+
+    echo $OUTPUT->heading(get_string('backup_heading', 'tool_bulkpluginmanager'), 2);
+
+    if ($backupexists) {
+        $size = display_size(filesize($backuppath));
+        $date = userdate(filemtime($backuppath));
+        echo $OUTPUT->notification(
+            get_string('backup_status_exists', 'tool_bulkpluginmanager', (object) ['size' => $size, 'date' => $date]),
+            \core\output\notification::NOTIFY_INFO
+        );
+    } else {
+        echo $OUTPUT->notification(
+            get_string('backup_status_none', 'tool_bulkpluginmanager'),
+            \core\output\notification::NOTIFY_WARNING
+        );
+    }
+
+    echo html_writer::tag('p', get_string('backup_desc', 'tool_bulkpluginmanager'), ['class' => 'text-muted']);
+
+    if (empty($plugins)) {
+        echo $OUTPUT->notification(get_string('backup_no_plugins', 'tool_bulkpluginmanager'), \core\output\notification::NOTIFY_INFO);
+        return;
+    }
+
+    // Build unique type list for filter dropdown.
+    $types = array_unique(array_column($plugins, 'type'));
+    sort($types);
+
+    // Search and filter controls.
+    echo html_writer::start_div('bpm-controls mb-3 d-flex flex-wrap gap-2 align-items-center');
+    echo html_writer::tag('input', '', [
+        'type'        => 'text',
+        'id'          => 'bpm-backup-search',
+        'class'       => 'form-control bpm-search-input',
+        'placeholder' => get_string('search_plugins', 'tool_bulkpluginmanager'),
+        'style'       => 'max-width:280px',
+    ]);
+
+    $typeopts = ['' => get_string('all_types', 'tool_bulkpluginmanager')];
+    foreach ($types as $type) {
+        $typeopts[$type] = $type;
+    }
+    echo html_writer::select($typeopts, 'bpm-backup-type-filter', '', false, ['id' => 'bpm-backup-type-filter', 'class' => 'custom-select bpm-type-select', 'style' => 'max-width:180px']);
+
+    echo html_writer::span(
+        html_writer::tag('span', '0', ['id' => 'bpm-backup-selected-count']) . ' selected',
+        'bpm-count-badge badge badge-primary ml-2 align-self-center'
+    );
+    echo html_writer::end_div();
+
+    // Plugin table.
+    $formurl = new moodle_url($baseurl, ['tab' => 'backup', 'action' => 'createbackup']);
+    echo html_writer::start_tag('form', ['method' => 'post', 'action' => $formurl->out(false), 'id' => 'bpm-backup-form']);
+    echo html_writer::empty_tag('input', ['type' => 'hidden', 'name' => 'sesskey', 'value' => sesskey()]);
+
+    echo html_writer::start_tag('table', ['class' => 'generaltable table table-striped table-sm bpm-plugin-table', 'id' => 'bpm-backup-table']);
+    echo html_writer::start_tag('thead');
+    echo html_writer::start_tag('tr');
+    echo html_writer::tag('th', html_writer::checkbox('selectall', '1', false, '', ['id' => 'bpm-backup-select-all', 'title' => get_string('select_all', 'tool_bulkpluginmanager')]), ['style' => 'width:40px']);
+    echo html_writer::tag('th', get_string('plugin_name',      'tool_bulkpluginmanager'));
+    echo html_writer::tag('th', get_string('plugin_component', 'tool_bulkpluginmanager'), ['class' => 'd-none d-md-table-cell']);
+    echo html_writer::tag('th', get_string('plugin_type',      'tool_bulkpluginmanager'), ['class' => 'd-none d-sm-table-cell']);
+    echo html_writer::tag('th', get_string('plugin_version',   'tool_bulkpluginmanager'), ['class' => 'd-none d-lg-table-cell']);
+    echo html_writer::end_tag('tr');
+    echo html_writer::end_tag('thead');
+    echo html_writer::start_tag('tbody');
+
+    foreach ($plugins as $plugin) {
+        $rowattrs = [
+            'data-type'         => $plugin->type,
+            'data-component'    => $plugin->component,
+            'data-dependencies' => json_encode($plugin->dependencies),
+        ];
+
+        echo html_writer::start_tag('tr', $rowattrs);
+
+        $cbattrs = ['value' => $plugin->component, 'name' => 'plugins[]', 'class' => 'bpm-backup-cb'];
+        echo html_writer::tag('td', html_writer::checkbox('plugins[]', $plugin->component, false, '', $cbattrs));
+
+        $namecell = html_writer::tag('strong', s($plugin->displayname));
+        if (!empty($plugin->dependencies)) {
+            $namecell .= html_writer::start_div('bpm-deps mt-1');
+            foreach ($plugin->dependencies as $dep) {
+                $namecell .= html_writer::tag('span', s($dep), [
+                    'class' => 'badge badge-info mr-1',
+                    'title' => get_string('depends_on', 'tool_bulkpluginmanager'),
+                ]);
+            }
+            $namecell .= html_writer::end_div();
+        }
+        echo html_writer::tag('td', $namecell);
+
+        echo html_writer::tag('td', html_writer::tag('code', s($plugin->component)), ['class' => 'd-none d-md-table-cell']);
+        echo html_writer::tag('td', s($plugin->type),    ['class' => 'd-none d-sm-table-cell']);
+        echo html_writer::tag('td', s($plugin->version), ['class' => 'd-none d-lg-table-cell']);
+
+        echo html_writer::end_tag('tr');
+    }
+
+    echo html_writer::end_tag('tbody');
+    echo html_writer::end_tag('table');
+
+    echo html_writer::start_div('bpm-form-actions mt-3 d-flex align-items-center gap-2');
+    echo html_writer::tag('button', get_string('backup_create_btn', 'tool_bulkpluginmanager'), [
+        'type'     => 'submit',
+        'id'       => 'bpm-backup-btn-create',
+        'class'    => 'btn btn-primary',
+        'disabled' => 'disabled',
+    ]);
+    echo html_writer::end_div();
+
+    echo html_writer::end_tag('form');
+
+    // Restore button (outside the backup form).
+    if ($backupexists && manager::is_install_allowed()) {
+        echo html_writer::start_div('mt-3');
+        $restoreurl = new moodle_url($baseurl, ['tab' => 'backup', 'action' => 'restore', 'step' => 2]);
+        echo html_writer::start_tag('form', ['method' => 'post', 'action' => $restoreurl->out(false), 'class' => 'd-inline']);
+        echo html_writer::empty_tag('input', ['type' => 'hidden', 'name' => 'sesskey', 'value' => sesskey()]);
+        echo html_writer::tag('button', get_string('backup_restore_btn', 'tool_bulkpluginmanager'), ['type' => 'submit', 'class' => 'btn btn-success']);
+        echo html_writer::end_tag('form');
+        echo html_writer::end_div();
+    }
+
+    // Inline JS for backup selector behaviour.
+    $js = <<<'JS'
+(function() {
+    var table = document.getElementById('bpm-backup-table');
+    var selectAll = document.getElementById('bpm-backup-select-all');
+    var search = document.getElementById('bpm-backup-search');
+    var typeFilter = document.getElementById('bpm-backup-type-filter');
+    var countEl = document.getElementById('bpm-backup-selected-count');
+    var createBtn = document.getElementById('bpm-backup-btn-create');
+
+    function updateCount() {
+        var checked = table.querySelectorAll('tbody input[type="checkbox"]:checked');
+        countEl.textContent = checked.length;
+        createBtn.disabled = checked.length === 0;
+    }
+
+    function getDeps(row) {
+        try { return JSON.parse(row.dataset.dependencies || '[]'); } catch(e) { return []; }
+    }
+
+    function findRow(component) {
+        return table.querySelector('tbody tr[data-component="' + CSS.escape(component) + '"]');
+    }
+
+    function setChecked(component, checked) {
+        var row = findRow(component);
+        if (row) {
+            var cb = row.querySelector('input[type="checkbox"]');
+            if (cb && !cb.disabled && cb.checked !== checked) {
+                cb.checked = checked;
+            }
+        }
+    }
+
+    selectAll.addEventListener('change', function() {
+        var checked = selectAll.checked;
+        table.querySelectorAll('tbody input[type="checkbox"]:not(:disabled)').forEach(function(cb) {
+            cb.checked = checked;
+        });
+        updateCount();
+    });
+
+    table.addEventListener('change', function(e) {
+        if (e.target.matches('input[type="checkbox"]')) {
+            var row = e.target.closest('tr');
+            var component = row.dataset.component;
+            var checked = e.target.checked;
+
+            if (checked) {
+                getDeps(row).forEach(function(dep) {
+                    setChecked(dep, true);
+                });
+            } else {
+                table.querySelectorAll('tbody tr').forEach(function(r) {
+                    var deps = getDeps(r);
+                    if (deps.indexOf(component) !== -1) {
+                        var cb = r.querySelector('input[type="checkbox"]');
+                        if (cb) cb.checked = false;
+                    }
+                });
+            }
+            updateCount();
+        }
+    });
+
+    function applyFilters() {
+        var term = search.value.toLowerCase().trim();
+        var type = typeFilter.value;
+        table.querySelectorAll('tbody tr').forEach(function(row) {
+            var text = row.textContent.toLowerCase();
+            var rowtype = row.dataset.type;
+            var visible = true;
+            if (term && text.indexOf(term) === -1) visible = false;
+            if (type && rowtype !== type) visible = false;
+            row.style.display = visible ? '' : 'none';
+        });
+    }
+
+    search.addEventListener('input', applyFilters);
+    typeFilter.addEventListener('change', applyFilters);
+    updateCount();
+})();
+JS;
+    echo html_writer::script($js);
+}
+
+// ----------------------------------------------------------------------------
+// BACKUP — Restore Step 2: Review order
+// ----------------------------------------------------------------------------
+
+function render_step2_restore(array $sorted, array $depmap, array $infomap, array $paths, array $errors, \renderer_base $OUTPUT, \moodle_page $PAGE): void {
+    $PAGE->requires->js_call_amd('tool_bulkpluginmanager/order_manager', 'initOrderList', ['bpm-order-list', 'install']);
+
+    $baseurl   = new moodle_url('/admin/tool/bulkpluginmanager/index.php');
+    $pluginman = core_plugin_manager::instance();
+
+    echo $OUTPUT->header();
+    echo render_tabs('backup', $OUTPUT);
+
+    if (!empty($errors)) {
+        echo $OUTPUT->notification(implode('<br>', array_map('s', $errors)), \core\output\notification::NOTIFY_WARNING);
+    }
+
+    echo $OUTPUT->heading(get_string('restore_order_heading', 'tool_bulkpluginmanager'), 2);
+    echo html_writer::tag('p', get_string('restore_order_desc', 'tool_bulkpluginmanager'), ['class' => 'text-muted']);
+
+    $formurl = new moodle_url($baseurl, ['tab' => 'backup', 'action' => 'restore', 'step' => 3]);
+    echo html_writer::start_tag('form', ['method' => 'post', 'action' => $formurl->out(false), 'id' => 'bpm-order-form']);
+    echo html_writer::empty_tag('input', ['type' => 'hidden', 'name' => 'sesskey', 'value' => sesskey()]);
+    echo html_writer::empty_tag('input', ['type' => 'hidden', 'name' => 'order',   'value' => json_encode($sorted), 'id' => 'bpm-order-input']);
+
+    echo html_writer::tag('button', get_string('btn_auto_sort', 'tool_bulkpluginmanager'), [
+        'type'  => 'button',
+        'id'    => 'bpm-auto-sort',
+        'class' => 'btn btn-outline-secondary btn-sm mb-3',
+    ]);
+
+    echo html_writer::start_tag('ul', ['class' => 'bpm-order-list list-group mb-3', 'id' => 'bpm-order-list']);
+    foreach ($sorted as $component) {
+        $info     = $infomap[$component] ?? null;
+        $deps     = $depmap[$component]  ?? [];
+        $existing = $pluginman->get_plugin_info($component);
+
+        $badge = $existing
+            ? html_writer::tag('span', get_string('already_installed', 'tool_bulkpluginmanager'), ['class' => 'badge badge-warning'])
+            : html_writer::tag('span', get_string('new_install',       'tool_bulkpluginmanager'), ['class' => 'badge badge-success']);
+
+        $depbadges = '';
+        foreach ($deps as $dep) {
+            $depbadges .= html_writer::tag('span', s($dep), ['class' => 'badge badge-info mr-1']);
+        }
+
+        $warning = html_writer::tag('span', '⚠ ' . get_string('dep_warning', 'tool_bulkpluginmanager'), [
+            'class' => 'bpm-dep-warning text-danger ml-2 small',
+            'title' => get_string('dep_warning_detail', 'tool_bulkpluginmanager'),
+            'style' => 'display:none',
+        ]);
+
+        $content  = html_writer::tag('span', '⠿', ['class' => 'bpm-drag-handle mr-2 text-muted', 'style' => 'cursor:grab']);
+        $content .= html_writer::tag('strong', s($component));
+        if ($info && $info->version) {
+            $content .= html_writer::tag('small', ' v' . s((string)$info->version), ['class' => 'text-muted ml-1']);
+        }
+        $content .= ' ' . $badge;
+        $content .= $warning;
+        if ($depbadges) {
+            $content .= html_writer::start_div('bpm-deps mt-1 ml-4');
+            $content .= html_writer::tag('small', get_string('depends_on', 'tool_bulkpluginmanager') . ': ', ['class' => 'text-muted']);
+            $content .= $depbadges;
+            $content .= html_writer::end_div();
+        }
+
+        $arrows   = html_writer::tag('button', '▲', ['type' => 'button', 'class' => 'bpm-move-up btn btn-sm btn-outline-secondary ml-2', 'title' => 'Move up']);
+        $arrows  .= html_writer::tag('button', '▼', ['type' => 'button', 'class' => 'bpm-move-down btn btn-sm btn-outline-secondary ml-1', 'title' => 'Move down']);
+
+        echo html_writer::tag('li', $content . html_writer::div($arrows, 'bpm-arrows ml-auto'), [
+            'class'          => 'list-group-item d-flex align-items-start',
+            'data-component' => $component,
+            'data-deps'      => json_encode($deps),
+        ]);
+    }
+    echo html_writer::end_tag('ul');
+
+    echo html_writer::start_div('bpm-form-actions mt-3 d-flex gap-2');
+    echo html_writer::tag('a', get_string('btn_back', 'tool_bulkpluginmanager'), [
+        'href'  => (new moodle_url($baseurl, ['tab' => 'backup']))->out(false),
+        'class' => 'btn btn-secondary',
+    ]);
+    echo html_writer::tag('button', get_string('btn_confirm_install', 'tool_bulkpluginmanager'), ['type' => 'submit', 'class' => 'btn btn-primary']);
+    echo html_writer::end_div();
+
+    echo html_writer::end_tag('form');
+    echo $OUTPUT->footer();
+}
+
+// ----------------------------------------------------------------------------
+// BACKUP — Restore Step 3: Confirm
+// ----------------------------------------------------------------------------
+
+function render_step3_restore(array $ordered, array $depmap, array $infomap, array $paths, array $violations, \renderer_base $OUTPUT, \moodle_page $PAGE): void {
+    $baseurl = new moodle_url('/admin/tool/bulkpluginmanager/index.php');
+
+    echo $OUTPUT->header();
+    echo render_tabs('backup', $OUTPUT);
+    echo $OUTPUT->heading(get_string('restore_confirm_heading', 'tool_bulkpluginmanager'), 2);
+    echo html_writer::tag('p', get_string('restore_confirm_desc', 'tool_bulkpluginmanager'));
+
+    if (!empty($violations)) {
+        $msgs = array_map(fn($v) => s($v['message']), $violations);
+        echo $OUTPUT->notification(implode('<br>', $msgs), \core\output\notification::NOTIFY_WARNING);
+    }
+
+    echo $OUTPUT->notification(get_string('install_warning', 'tool_bulkpluginmanager'), \core\output\notification::NOTIFY_WARNING);
+
+    echo html_writer::start_tag('ol', ['class' => 'bpm-confirm-list']);
+    foreach ($ordered as $component) {
+        $info    = $infomap[$component] ?? null;
+        $version = $info ? ' v' . $info->version : '';
+        echo html_writer::tag('li', s($component) . html_writer::tag('small', $version, ['class' => 'text-muted ml-1']));
+    }
+    echo html_writer::end_tag('ol');
+
+    $execurl = new moodle_url($baseurl, ['tab' => 'backup', 'action' => 'execute_restore']);
+    echo html_writer::start_tag('form', ['method' => 'post', 'action' => $execurl->out(false)]);
+    echo html_writer::empty_tag('input', ['type' => 'hidden', 'name' => 'sesskey', 'value' => sesskey()]);
+    echo html_writer::empty_tag('input', ['type' => 'hidden', 'name' => 'order',   'value' => json_encode($ordered)]);
+
+    echo html_writer::start_div('bpm-form-actions mt-3 d-flex gap-2');
+    echo html_writer::tag('a', get_string('btn_back', 'tool_bulkpluginmanager'), [
+        'href'  => (new moodle_url($baseurl, ['tab' => 'backup']))->out(false),
+        'class' => 'btn btn-secondary',
+    ]);
+    echo html_writer::tag('button', get_string('btn_execute_install', 'tool_bulkpluginmanager'), ['type' => 'submit', 'class' => 'btn btn-primary']);
+    echo html_writer::end_div();
+
+    echo html_writer::end_tag('form');
+    echo $OUTPUT->footer();
+}
+
+// ----------------------------------------------------------------------------
+// BACKUP — Restore Execute
+// ----------------------------------------------------------------------------
+
+function render_execute_restore(array $ordered, array $paths, array $infomap, \renderer_base $OUTPUT, \moodle_page $PAGE): void {
+    global $CFG;
+    require_once($CFG->libdir . '/upgradelib.php');
+
+    echo $OUTPUT->header();
+    echo render_tabs('backup', $OUTPUT);
+    echo $OUTPUT->heading(get_string('restore_deploying', 'tool_bulkpluginmanager'), 2);
+
+    echo html_writer::start_tag('ul', ['class' => 'bpm-progress-list list-group']);
+
+    $success    = 0;
+    $failed     = 0;
+    $deployable = [];
+
+    foreach ($ordered as $component) {
+        if (!isset($paths[$component])) {
+            echo html_writer::tag('li',
+                html_writer::tag('span', '⚠', ['class' => 'text-warning mr-2']) . s("No path found for {$component}"),
+                ['class' => 'list-group-item list-group-item-warning']
+            );
+            $failed++;
+            continue;
+        }
+
+        $info = $infomap[$component] ?? null;
+        if ($info === null) {
+            $failed++;
+            continue;
+        }
+
+        $obj              = new \stdClass();
+        $obj->component   = $component;
+        $obj->zipfilepath = $paths[$component];
+        $deployable[]     = $obj;
+    }
+
+    if (!empty($deployable)) {
+        $pluginman = core_plugin_manager::instance();
+
+        // Validate first (dry run).
+        echo html_writer::end_tag('ul');
+        echo html_writer::start_tag('pre', ['class' => 'bpm-install-log bg-dark text-light p-3 rounded mt-3']);
+
+        $validated = $pluginman->install_plugins($deployable, false, false);
+
+        echo html_writer::end_tag('pre');
+
+        if ($validated) {
+            // Actually deploy.
+            echo html_writer::start_tag('pre', ['class' => 'bpm-install-log bg-dark text-light p-3 rounded mt-1']);
+            $pluginman->install_plugins($deployable, true, false);
+            echo html_writer::end_tag('pre');
+
+            core_plugin_manager::reset_caches();
+
+            echo $OUTPUT->notification(get_string('restore_complete_manual', 'tool_bulkpluginmanager'), \core\output\notification::NOTIFY_SUCCESS);
+
+            echo html_writer::tag('a', get_string('complete_upgrade', 'tool_bulkpluginmanager'), [
+                'href'  => (new moodle_url('/admin/index.php', ['cache' => 0, 'confirmplugincheck' => 0]))->out(false),
+                'class' => 'btn btn-success mt-2',
+            ]);
+        } else {
+            echo $OUTPUT->notification('Validation failed — please check the log above.', \core\output\notification::NOTIFY_ERROR);
+        }
+    }
+
+    echo $OUTPUT->footer();
 }

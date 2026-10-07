@@ -25,7 +25,7 @@
 defined('MOODLE_INTERNAL') || die();
 
 $plugin->component = 'tool_bulkpluginmanager';
-$plugin->version   = 2024042201;
+$plugin->version   = 2024042202;
 $plugin->requires  = 2023100900; // Moodle 4.3 minimum (covers 4.5, 5.0, 5.1, 5.2).
 $plugin->maturity  = MATURITY_STABLE;
 $plugin->release   = '1.0.0';

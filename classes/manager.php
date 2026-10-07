@@ -95,6 +95,7 @@ class manager {
                 // Conditionally uninstallable: type permits it but dependents are in the way.
                 $obj->can_uninstall_conditionally = !$canuninstall && $typeallows && !empty($blockedby);
                 $obj->is_standard  = $info->is_standard();
+                $obj->rootdir      = $info->rootdir ?? '';
 
                 $result[] = $obj;
             }
@@ -378,5 +379,242 @@ class manager {
         $obj->rootdir      = $rootdir;
 
         return $obj;
+    }
+
+    // -------------------------------------------------------------------------
+    // Backup / restore helpers
+    // -------------------------------------------------------------------------
+
+    /**
+     * Get the backup filename based on the dataroot folder name.
+     *
+     * @return string
+     */
+    public static function get_backup_filename(): string {
+        global $CFG;
+        return basename($CFG->dataroot) . '_additional_plugin_backup.zip';
+    }
+
+    /**
+     * Get the full path to the backup zip.
+     *
+     * @return string
+     */
+    public static function get_backup_path(): string {
+        global $CFG;
+        return $CFG->dataroot . '/' . self::get_backup_filename();
+    }
+
+    /**
+     * Return only additional (non-core) installed plugins that have a rootdir.
+     *
+     * @return array
+     */
+    public static function get_additional_plugins(): array {
+        $all = self::get_all_plugins();
+        return array_values(array_filter($all, fn($p) => empty($p->is_standard) && !empty($p->rootdir)));
+    }
+
+    /**
+     * Create a mega backup zip of additional plugins.
+     *
+     * @param string[] $selected  Optional list of component names to back up. If empty, all additional plugins are backed up.
+     * @return array  Associative array with keys: success, path, plugins, error.
+     */
+    public static function create_backup(array $selected = []): array {
+        global $CFG;
+
+        $plugins = self::get_additional_plugins();
+        if (!empty($selected)) {
+            $selectedset = array_flip($selected);
+            $plugins = array_filter($plugins, fn($p) => isset($selectedset[$p->component]));
+            $plugins = array_values($plugins);
+        }
+
+        if (empty($plugins)) {
+            return [
+                'success'  => false,
+                'error'    => get_string('backup_no_plugins', 'tool_bulkpluginmanager'),
+                'path'     => '',
+                'plugins'  => [],
+            ];
+        }
+
+        $backuppath = self::get_backup_path();
+        $dir = dirname($backuppath);
+
+        if (!is_writable($dir)) {
+            return [
+                'success' => false,
+                'error'   => get_string('backup_dir_not_writable', 'tool_bulkpluginmanager', $dir),
+                'path'    => '',
+                'plugins' => [],
+            ];
+        }
+
+        // Build the zip in a temp directory first, then move it.
+        // This avoids ZipArchive temp-file permission issues in the dataroot.
+        $tmpdir   = make_temp_directory('tool_bulkpluginmanager/backup');
+        $tempzip  = tempnam($tmpdir, 'bkp_') . '.zip';
+        $filename = basename($backuppath);
+
+        $zip = new \ZipArchive();
+        if ($zip->open($tempzip, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) !== true) {
+            return [
+                'success' => false,
+                'error'   => get_string('backup_zip_open_failed', 'tool_bulkpluginmanager'),
+                'path'    => '',
+                'plugins' => [],
+            ];
+        }
+
+        $backedup = [];
+        foreach ($plugins as $plugin) {
+            $rootdir = $plugin->rootdir;
+            if (!is_dir($rootdir)) {
+                continue;
+            }
+
+            $relativepath = substr($rootdir, strlen($CFG->dirroot) + 1);
+            if (empty($relativepath)) {
+                continue;
+            }
+
+            $iterator = new \RecursiveIteratorIterator(
+                new \RecursiveDirectoryIterator($rootdir, \RecursiveDirectoryIterator::SKIP_DOTS),
+                \RecursiveIteratorIterator::SELF_FIRST
+            );
+
+            $added = false;
+            foreach ($iterator as $file) {
+                $filepath  = $file->getRealPath();
+                $localname = $relativepath . '/' . substr($filepath, strlen($rootdir) + 1);
+                if ($file->isDir()) {
+                    $zip->addEmptyDir($localname);
+                    $added = true;
+                } else if (is_readable($filepath)) {
+                    $zip->addFile($filepath, $localname);
+                    $added = true;
+                }
+            }
+
+            if ($added) {
+                $backedup[] = $plugin->component;
+            }
+        }
+
+        // Close the zip in temp.
+        $closed = @$zip->close();
+        $status = $zip->getStatusString();
+        if (!$closed || !file_exists($tempzip)) {
+            @unlink($tempzip);
+            return [
+                'success' => false,
+                'error'   => get_string('backup_zip_close_failed', 'tool_bulkpluginmanager', [
+                    'file'   => $filename,
+                    'status' => $status ?: 'unknown',
+                    'temp'   => $tempzip,
+                ]),
+                'path'    => '',
+                'plugins' => [],
+            ];
+        }
+
+        // Move the finished zip to the final destination.
+        // Remove any existing file first to avoid ownership conflicts.
+        if (file_exists($backuppath)) {
+            @unlink($backuppath);
+        }
+
+        if (!@rename($tempzip, $backuppath)) {
+            // Fall back to copy+unlink if rename fails across filesystems.
+            if (!@copy($tempzip, $backuppath)) {
+                @unlink($tempzip);
+                return [
+                    'success' => false,
+                    'error'   => get_string('backup_move_failed', 'tool_bulkpluginmanager', $filename),
+                    'path'    => '',
+                    'plugins' => [],
+                ];
+            }
+            @unlink($tempzip);
+        }
+
+        return [
+            'success' => true,
+            'path'    => $backuppath,
+            'plugins' => $backedup,
+            'error'   => null,
+        ];
+    }
+
+    /**
+     * Extract plugins from the mega backup zip into temporary individual zips.
+     *
+     * @return array  Array of stdClass objects (same shape as store_uploaded_zips).
+     */
+    public static function extract_plugins_from_backup(): array {
+        global $CFG;
+
+        $backuppath = self::get_backup_path();
+        if (!file_exists($backuppath)) {
+            return [];
+        }
+
+        $zip = new \ZipArchive();
+        if ($zip->open($backuppath) !== true) {
+            return [];
+        }
+
+        $tempbase = make_temp_directory('tool_bulkpluginmanager/restore_' . sesskey());
+        $zip->extractTo($tempbase);
+        $zip->close();
+
+        $results = [];
+
+        // Scan for plugin directories (structure: <plugintype>/<pluginname>).
+        $typedirs = glob($tempbase . '/*', GLOB_ONLYDIR);
+        foreach ($typedirs as $typedir) {
+            $typename = basename($typedir);
+            // Skip OSX metadata.
+            if ($typename === '__MACOSX') {
+                continue;
+            }
+            $plugindirs = glob($typedir . '/*', GLOB_ONLYDIR);
+            foreach ($plugindirs as $plugindir) {
+                $pluginname = basename($plugindir);
+
+                // Create a temporary zip from this plugin directory.
+                $tempzip = $tempbase . '/' . $typename . '_' . $pluginname . '.zip';
+                $pzip = new \ZipArchive();
+                $pzip->open($tempzip, \ZipArchive::CREATE | \ZipArchive::OVERWRITE);
+
+                $iterator = new \RecursiveIteratorIterator(
+                    new \RecursiveDirectoryIterator($plugindir, \RecursiveDirectoryIterator::SKIP_DOTS),
+                    \RecursiveIteratorIterator::SELF_FIRST
+                );
+                foreach ($iterator as $file) {
+                    $fp = $file->getRealPath();
+                    $ln = substr($fp, strlen($plugindir) + 1);
+                    if ($file->isDir()) {
+                        $pzip->addEmptyDir($ln);
+                    } else {
+                        $pzip->addFile($fp, $ln);
+                    }
+                }
+                $pzip->close();
+
+                $info = self::parse_zip($tempzip);
+                if ($info !== null) {
+                    $entry = new \stdClass();
+                    $entry->path = $tempzip;
+                    $entry->original_name = basename($tempzip);
+                    $entry->info = $info;
+                    $results[] = $entry;
+                }
+            }
+        }
+
+        return $results;
     }
 }
